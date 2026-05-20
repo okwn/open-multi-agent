@@ -75,6 +75,12 @@ export async function createAdapter(
   baseURL?: string,
   region?: string,
 ): Promise<LLMAdapter> {
+  // Reject empty-string apiKey; a missing key should be omitted entirely so that
+  // the individual adapter can fall back to its default credential sources.
+  if (apiKey !== undefined && apiKey === '') {
+    throw new Error('apiKey must not be an empty string')
+  }
+
   switch (provider) {
     case 'anthropic': {
       const { AnthropicAdapter } = await import('./anthropic.js')
