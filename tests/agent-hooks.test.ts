@@ -470,4 +470,69 @@ describe('Agent hooks — beforeRun / afterRun', () => {
     expect(beforeSpy.mock.calls[0]![0].prompt).toBe('turn 1')
     expect(beforeSpy.mock.calls[1]![0].prompt).toBe('turn 2')
   })
+
+  // -----------------------------------------------------------------------
+  // beforeRun returning null / undefined is handled safely
+  // -----------------------------------------------------------------------
+
+  it('beforeRun returning null is treated as context loss and returns original', async () => {
+    const config: AgentConfig = {
+      ...baseConfig,
+      beforeRun: () => null as unknown as import('../src/types.js').BeforeRunHookContext,
+    }
+    const { agent } = buildMockAgent(config, 'reply')
+    // Should not throw — treat null as no-op pass-through
+    await agent.prompt('test')
+  })
+
+  it('beforeRun returning undefined preserves original prompt', async () => {
+    let capturedPrompt: string | undefined
+    const config: AgentConfig = {
+      ...baseConfig,
+      beforeRun: (ctx) => {
+        capturedPrompt = ctx.prompt
+        return undefined as unknown as import('../src/types.js').BeforeRunHookContext
+      },
+    }
+    const { agent } = buildMockAgent(config, 'ok')
+    await agent.run('original-prompt')
+    // The run should use "original-prompt" not undefined
+    expect(capturedPrompt).toBe('original-prompt')
+  })
+
+  // -----------------------------------------------------------------------
+  // afterRun returning null / undefined is handled safely
+  // -----------------------------------------------------------------------
+
+  it('afterRun returning null does not crash the run', async () => {
+    const config: AgentConfig = {
+      ...baseConfig,
+      afterRun: () => null as unknown as AgentRunResult,
+    }
+    const { agent } = buildMockAgent(config, 'ok')
+    // Should not throw
+    await agent.prompt('test')
+  })
+
+  // -----------------------------------------------------------------------
+  // HookContext.agent type completeness
+  // -----------------------------------------------------------------------
+
+  it('HookContext.agent contains all required AgentConfig fields', async () => {
+    let ctxAgent: import('../src/types.js').AgentConfig | undefined
+
+    const config: AgentConfig = {
+      ...baseConfig,
+      beforeRun: (ctx) => {
+        ctxAgent = ctx.agent
+        return ctx
+      },
+    }
+    const { agent } = buildMockAgent(config, 'ok')
+    await agent.run('test')
+
+    expect(ctxAgent).toBeDefined()
+    expect(typeof ctxAgent!.name).toBe('string')
+    expect(typeof ctxAgent!.model).toBe('string')
+  })
 })
