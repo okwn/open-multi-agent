@@ -443,3 +443,39 @@ describe('buildOpenAIMessageList', () => {
     expect(result).toHaveLength(1)
   })
 })
+
+// ===========================================================================
+// createAdapter edge cases
+// ===========================================================================
+
+describe('createAdapter apiKey validation', () => {
+  it('rejects empty string apiKey', async () => {
+    await expect(
+      createAdapter('openai', ''),
+    ).rejects.toThrow()
+  })
+
+  it('rejects whitespace-only apiKey', async () => {
+    await expect(
+      createAdapter('openai', '   '),
+    ).rejects.toThrow()
+  })
+
+  it('accepts undefined apiKey (env var fallback)', async () => {
+    // When apiKey is undefined the adapter reads from process.env
+    const adapter = await createAdapter('openai', undefined)
+    expect(adapter.name).toBe('openai')
+  })
+
+  it('rejects empty string for anthropic', async () => {
+    await expect(
+      createAdapter('anthropic', ''),
+    ).rejects.toThrow()
+  })
+
+  it('rejects empty string for gemini', async () => {
+    await expect(
+      createAdapter('gemini', ''),
+    ).rejects.toThrow()
+  })
+})
