@@ -403,5 +403,159 @@ describe('SharedMemory', () => {
       expect(await store.get('alice/gone')).not.toBeNull()
       expect(await store.list()).toHaveLength(1)
     })
+
+    it('expiresAtTurn is set correctly at write time', async () => {
+      const mem = new SharedMemory()
+      await mem.writeExpiring('alice', 't1', 'v1', 3)
+      // turnCount is 0, expiresAtTurn should be 0 + 3 = 3
+      const entry = await mem.getStore().get('alice/t1')
+      expect(entry?.expiresAtTurn).toBe(3)
+
+      mem.advanceTurn()
+      await mem.writeExpiring('bob', 't2', 'v2', 2)
+      // turnCount is now 1, expiresAtTurn should be 1 + 2 = 3
+      const bobEntry = await mem.getStore().get('bob/t2')
+      expect(bobEntry?.expiresAtTurn).toBe(3)
+    })
+
+    it('multiple tasks in same batch share initial turn count', async () => {
+      // Simulate a parallel batch: all tasks see turnCount=0 when they write.
+      // Task A (alice) writes with ttlTurns=2 -> expires at turn 2
+      // Task B (bob)   writes with ttlTurns=2 -> expires at turn 2
+      // Task C (carol) writes with ttlTurns=1 -> expires at turn 1
+      const mem = new SharedMemory()
+      mem.advanceTurn() // turn = 1 (first advanceTurn in orchestrator loop)
+
+      // Simulate two tasks writing before their results complete:
+      // This is the key parallel semantics issue: if tasks run concurrently
+      // and complete in a different order than they started, the turn counter
+      // advances per completed task, not per started task.
+      await mem.writeExpiring('alice', 't1', 'v1', 1) // expires at turn 2
+      await mem.writeExpiring('bob', 't2', 'v2', 1) // expires at turn 2
+
+      // Both should be readable at turn 1
+      expect(await mem.read('alice/t1')).not.toBeNull()
+      expect(await mem.read('bob/t2')).not.toBeNull()
+
+      // First completion advances turn to 2 — both expire simultaneously
+      mem.advanceTurn()
+      expect(await mem.read('alice/t1')).toBeNull()
+      expect(await mem.read('bob/t2')).toBeNull()
+    })
+
+    it('faster task completing first advances turn before slower task reads', async () => {
+      // Document the race: if Task A (fast) and Task B (slow) run in parallel,
+      // Task A completes first -> turn advances to 1 -> Task B's TTL entry
+      // may expire sooner than expected if Task B started at turn 0 and uses ttlTurns=1.
+      const mem = new SharedMemory()
+      // Initial state: turn = 0
+
+      // Task A (alice): writes entry with ttl=1, expires at turn 1
+      await mem.writeExpiring('alice', 't1', 'v1', 1)
+
+      // Task B (bob): writes entry with ttl=2, expires at turn 2
+      await mem.writeExpiring('bob', 't2', 'v2', 2)
+
+      // Simulate Task A completing first (advanceTurn called once)
+      mem.advanceTurn() // turn = 1
+
+      // alice/t1 is now expired (turn >= expiresAtTurn)
+      expect(await mem.read('alice/t1')).toBeNull()
+
+      // bob/t2 is still live (turn 1 < expiresAtTurn 2)
+      expect(await mem.read('bob/t2')).not.toBeNull()
+
+      // Second completion (Task B) advances turn to 2
+      mem.advanceTurn() // turn = 2
+      expect(await mem.read('bob/t2')).toBeNull()
+    })
+
+    it('concurrent writeExpiring calls produce correct individual expiresAtTurn values', async () => {
+      // Even though writeExpiring calls happen in sequence (JS is single-threaded),
+      // they all observe the same initial turnCount. Subsequent advanceTurn calls
+      // may then expire them out of order.
+      const mem = new SharedMemory()
+      expect(mem.getTurnCount()).toBe(0)
+
+      await mem.writeExpiring('a', 'k1', 'v1', 2) // expires at turn 2
+      await mem.writeExpiring('b', 'k2', 'v2', 2) // expires at turn 2
+      await mem.writeExpiring('c', 'k3', 'v3', 1) // expires at turn 1
+
+      // All written at turn 0, so expiresAtTurn is absolute (not relative)
+      const entry1 = await mem.getStore().get('a/k1')
+      const entry2 = await mem.getStore().get('b/k2')
+      const entry3 = await mem.getStore().get('c/k3')
+
+      expect(entry1?.expiresAtTurn).toBe(2)
+      expect(entry2?.expiresAtTurn).toBe(2)
+      expect(entry3?.expiresAtTurn).toBe(1)
+
+      // Advance once: only k3 expires
+      mem.advanceTurn()
+      expect(await mem.read('a/k1')).not.toBeNull()
+      expect(await mem.read('b/k2')).not.toBeNull()
+      expect(await mem.read('c/k3')).toBeNull()
+
+      // Advance twice: k1 and k2 expire
+      mem.advanceTurn()
+      expect(await mem.read('a/k1')).toBeNull()
+      expect(await mem.read('b/k2')).toBeNull()
+    })
+
+    it('writeExpiring then overwrite with write() removes expiresAtTurn', async () => {
+      const mem = new SharedMemory()
+      await mem.writeExpiring('alice', 'key', 'ttl-value', 1)
+      expect((await mem.getStore().get('alice/key'))?.expiresAtTurn).toBe(1)
+
+      // Overwrite without TTL
+      await mem.write('alice', 'key', 'permanent-value')
+      const entry = await mem.getStore().get('alice/key')
+      expect(entry?.expiresAtTurn).toBeUndefined()
+      expect(entry?.value).toBe('permanent-value')
+
+      mem.advanceTurn() // would have expired the TTL version
+      expect(await mem.read('alice/key')).not.toBeNull() // permanent, never expires
+    })
+
+    it('writeExpiring then overwrite with writeExpiring updates expiresAtTurn', async () => {
+      const mem = new SharedMemory()
+      await mem.writeExpiring('alice', 'key', 'v1', 1)
+      expect((await mem.getStore().get('alice/key'))?.expiresAtTurn).toBe(1)
+
+      mem.advanceTurn() // turn = 1, entry now expired from alice's perspective
+
+      await mem.writeExpiring('alice', 'key', 'v2', 2) // new expires at turn 3
+
+      const entry = await mem.getStore().get('alice/key')
+      expect(entry?.value).toBe('v2')
+      expect(entry?.expiresAtTurn).toBe(3)
+      // Still readable (turn 1 < 3)
+      expect(await mem.read('alice/key')).not.toBeNull()
+
+      mem.advanceTurn() // turn = 2
+      expect(await mem.read('alice/key')).not.toBeNull()
+
+      mem.advanceTurn() // turn = 3
+      expect(await mem.read('alice/key')).toBeNull()
+    })
+
+    it('very short ttl (1 turn) expires correctly', async () => {
+      const mem = new SharedMemory()
+      await mem.writeExpiring('alice', 'one-turn', 'value', 1)
+      expect(await mem.read('alice/one-turn')).not.toBeNull()
+
+      mem.advanceTurn() // turn = 1, now equals expiresAtTurn
+      expect(await mem.read('alice/one-turn')).toBeNull()
+    })
+
+    it('ttl with large value does not affect expiration logic', async () => {
+      const mem = new SharedMemory()
+      const largeValue = 'x'.repeat(100_000)
+      await mem.writeExpiring('alice', 'big', largeValue, 1)
+
+      expect(await mem.read('alice/big')).not.toBeNull()
+      mem.advanceTurn()
+      expect(await mem.read('alice/big')).toBeNull()
+    })
   })
 })
